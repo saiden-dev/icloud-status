@@ -2,6 +2,50 @@ import ArgumentParser
 import Foundation
 import Rainbow
 
+// MARK: - Spinner
+
+class Spinner {
+    private let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    private var frameIndex = 0
+    private var isRunning = false
+    private var message: String
+    private var thread: Thread?
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    func start() {
+        isRunning = true
+        thread = Thread { [weak self] in
+            while self?.isRunning == true {
+                self?.render()
+                Thread.sleep(forTimeInterval: 0.08)
+            }
+        }
+        thread?.start()
+    }
+
+    func update(_ newMessage: String) {
+        message = newMessage
+    }
+
+    func stop(success: Bool = true) {
+        isRunning = false
+        thread = nil
+        // Clear the spinner line
+        print("\r\u{001B}[K", terminator: "")
+        fflush(stdout)
+    }
+
+    private func render() {
+        let frame = frames[frameIndex % frames.count]
+        print("\r\(frame.cyan) \(message)", terminator: "")
+        fflush(stdout)
+        frameIndex += 1
+    }
+}
+
 // MARK: - CLI Command
 
 @main
@@ -151,7 +195,7 @@ func getSyncStatus() -> SyncStatus {
 }
 
 func getActiveContainers() -> [String] {
-    let result = shell("brctl status 2>&1 | grep 'client:idle' | grep -v 'SYNC DISABLED' | head -15")
+    let result = shell("brctl status 2>&1 | grep 'client:idle' | grep -v 'SYNC DISABLED'")
     var containers: [String] = []
 
     for line in result.output.components(separatedBy: "\n") {
@@ -426,7 +470,32 @@ func showBriefStatus() {
 }
 
 func showFullStatus() {
+    let spinner = Spinner("Loading iCloud status...")
+    spinner.start()
+
+    // Fetch all data first (slow operations)
+    spinner.update("Fetching container info...")
     let containerMapping = getContainerMapping()
+
+    spinner.update("Fetching sync status...")
+    let sync = getSyncStatus()
+    let containers = getActiveContainers()
+    let pending = getPendingItems()
+    let issues = getIssues()
+
+    spinner.update("Fetching storage info...")
+    let quota = getQuota()
+    let accountInfo = getAccountInfo()
+    let lastSync = getLastSyncTime()
+    let driveSize = getDriveSize()
+    let containerCount = getContainerCount()
+
+    spinner.update("Checking system status...")
+    let ddStatus = getDesktopDocumentsStatus()
+    let bird = getBirdStatus()
+    let network = getNetworkStatus()
+
+    spinner.stop()
 
     print("")
     print("╔══════════════════════════════════════╗".cyan)
@@ -435,19 +504,18 @@ func showFullStatus() {
 
     // Storage
     printHeader("STORAGE")
-    if let quota = getQuota() {
-        print("  Remaining: \(formatBytes(quota).green)")
+    if let q = quota {
+        print("  Remaining: \(formatBytes(q).green)")
     } else {
         print("  Remaining: \("Unable to fetch".red)")
     }
 
-    if let account = getAccountInfo() {
+    if let account = accountInfo {
         print("  Account:   \(account)")
     }
 
     // Sync Status
     printHeader("SYNC STATUS")
-    let sync = getSyncStatus()
     print("  Total Containers:    \(sync.total)")
     print("  Idle (synced):       \(String(sync.idle).green)")
     print("  Currently syncing:   \(sync.syncing > 0 ? String(sync.syncing).yellow : "0")")
@@ -459,24 +527,22 @@ func showFullStatus() {
     }
     print("  Disabled (no app):   \(String(sync.disabled).blue)")
 
-    if let lastSync = getLastSyncTime() {
-        print("  Last Sync:           \(lastSync)")
+    if let ls = lastSync {
+        print("  Last Sync:           \(ls)")
     }
 
     // iCloud Drive
     printHeader("ICLOUD DRIVE")
     print("  Location:   ~/Library/Mobile Documents/")
-    print("  Total Size: \(getDriveSize())")
-    print("  Containers: \(getContainerCount())")
+    print("  Total Size: \(driveSize)")
+    print("  Containers: \(containerCount)")
 
     // Desktop & Documents
-    let ddStatus = getDesktopDocumentsStatus()
     printHeader("DESKTOP & DOCUMENTS")
 
     func formatSyncState(_ state: SyncState, name: String) -> String {
         switch state {
         case .synced(let icloudSize, let localSize):
-            // Check if iCloud is empty but local has content (sync not working)
             if icloudSize == "0B" && localSize != "0B" && localSize != "N/A" {
                 return "  \(name):   \("Not syncing".yellow) (iCloud: \(icloudSize), Local: \(localSize))"
             }
@@ -495,30 +561,22 @@ func showFullStatus() {
 
     // Daemon Status
     printHeader("DAEMON STATUS")
-    let bird = getBirdStatus()
     let birdStatus = bird.running ? "Running".green + " (PID \(bird.pid))" : "Stopped".red
     print("  Bird:    \(birdStatus)")
-
-    let network = getNetworkStatus()
     print("  Network: \(network ? "Reachable".green : "Unreachable".red)")
 
     // Active Containers
-    printHeader("ACTIVE CONTAINERS")
-    let containers = getActiveContainers()
+    printHeader("ACTIVE CONTAINERS (\(containers.count))")
     if containers.isEmpty {
         print("  No active containers")
     } else {
-        for container in containers.prefix(12) {
+        for container in containers {
             let name = resolveContainerName(container, mapping: containerMapping)
             print("  • \(name)")
-        }
-        if containers.count > 12 {
-            print("  ... and \(containers.count - 12) more".dim)
         }
     }
 
     // Pending Sync
-    let pending = getPendingItems()
     if !pending.isEmpty {
         printHeader("PENDING SYNC")
         for item in pending {
@@ -529,7 +587,6 @@ func showFullStatus() {
     }
 
     // Issues
-    let issues = getIssues()
     printHeader("ISSUES")
     if issues.isEmpty {
         print("  \("None detected".green)")
