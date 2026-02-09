@@ -202,9 +202,9 @@ func getDriveSize() -> String {
 }
 
 enum SyncState {
-    case synced(size: String)
-    case symlink(size: String)
-    case local(size: String)
+    case synced(icloudSize: String, localSize: String)
+    case symlink(localSize: String)
+    case local(localSize: String)
     case notSynced
 }
 
@@ -214,25 +214,29 @@ func getDesktopDocumentsStatus() -> (desktop: SyncState, documents: SyncState) {
     func checkFolder(_ name: String, localPath: String) -> SyncState {
         let icloudPath = "\(icloudBase)/\(name)"
 
+        // Get local folder size
+        let localSize = shell("du -sh \(localPath) 2>/dev/null | awk '{print $1}'").output
+        let localSizeStr = localSize.isEmpty ? "N/A" : localSize
+
         // Check if path exists in iCloud
         let exists = shell("ls -d \(icloudPath) 2>/dev/null").exitCode == 0
         if !exists {
-            // Not in iCloud at all - check local size
-            let localSize = shell("du -sh \(localPath) 2>/dev/null | awk '{print $1}'").output
-            return .local(size: localSize.isEmpty ? "N/A" : localSize)
+            return .local(localSize: localSizeStr)
         }
 
         // Check if it's a symlink
         let isSymlink = shell("test -L \(icloudPath) && echo yes").output == "yes"
         if isSymlink {
-            // It's a symlink - get local folder size
-            let localSize = shell("du -sh \(localPath) 2>/dev/null | awk '{print $1}'").output
-            return .symlink(size: localSize.isEmpty ? "N/A" : localSize)
+            return .symlink(localSize: localSizeStr)
         }
 
-        // Real iCloud folder - get iCloud size (follow symlinks with -L)
-        let icloudSize = shell("du -shL \(icloudPath) 2>/dev/null | awk '{print $1}'").output
-        return .synced(size: icloudSize.isEmpty ? "0B" : icloudSize)
+        // Real iCloud folder - get iCloud size
+        let icloudSize = shell("du -sh \(icloudPath) 2>/dev/null | awk '{print $1}'").output
+        let icloudSizeStr = icloudSize.isEmpty ? "0B" : icloudSize
+
+        // Check if iCloud folder is empty/tiny but local has content
+        // This indicates sync is not working properly
+        return .synced(icloudSize: icloudSizeStr, localSize: localSizeStr)
     }
 
     let desktop = checkFolder("Desktop", localPath: "~/Desktop")
@@ -433,12 +437,16 @@ func showFullStatus() {
 
     func formatSyncState(_ state: SyncState, name: String) -> String {
         switch state {
-        case .synced(let size):
-            return "  \(name):   \("Synced".green) (\(size))"
-        case .symlink(let size):
-            return "  \(name):   \("Local".yellow) (\(size)) - symlink to ~/\(name)"
-        case .local(let size):
-            return "  \(name):   \("Local".yellow) (\(size)) - not synced"
+        case .synced(let icloudSize, let localSize):
+            // Check if iCloud is empty but local has content (sync not working)
+            if icloudSize == "0B" && localSize != "0B" && localSize != "N/A" {
+                return "  \(name):   \("Not syncing".yellow) (iCloud: \(icloudSize), Local: \(localSize))"
+            }
+            return "  \(name):   \("Synced".green) (\(icloudSize))"
+        case .symlink(let localSize):
+            return "  \(name):   \("Local".yellow) (\(localSize)) - symlink in iCloud"
+        case .local(let localSize):
+            return "  \(name):   \("Local".yellow) (\(localSize)) - not in iCloud"
         case .notSynced:
             return "  \(name):   \("Not configured".dim)"
         }
