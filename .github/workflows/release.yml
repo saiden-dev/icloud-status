@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal binary
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          mkdir -p dist
+          cp .build/apple/Products/Release/icloud-status dist/
+          cd dist && tar -czf icloud-status-${{ github.ref_name }}-macos.tar.gz icloud-status
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/icloud-status-${{ github.ref_name }}-macos.tar.gz
+          generate_release_notes: true
