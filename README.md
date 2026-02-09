@@ -1,5 +1,7 @@
 # icloud-status
 
+[![GitHub release](https://img.shields.io/github/v/tag/aladac/icloud-status?label=version)](https://github.com/aladac/icloud-status/releases)
+
 A macOS CLI tool to display comprehensive iCloud status information.
 
 ## Features
@@ -22,6 +24,12 @@ A macOS CLI tool to display comprehensive iCloud status information.
 - [just](https://github.com/casey/just) (optional, for build commands)
 
 ## Installation
+
+### Homebrew
+
+```bash
+brew install aladac/tap/icloud-status
+```
 
 ### Using just
 
