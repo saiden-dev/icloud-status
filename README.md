@@ -17,8 +17,8 @@ A macOS CLI tool to display comprehensive iCloud status information.
 
 ## Requirements
 
-- macOS (uses `brctl` - Bird Control)
-- Swift 5.x
+- macOS 12+
+- Swift 5.9+
 - [just](https://github.com/casey/just) (optional, for build commands)
 
 ## Installation
@@ -36,17 +36,41 @@ just install-global
 ### Manual
 
 ```bash
-# Compile
-swiftc -O -o icloud-status src/main.swift
+# Build
+swift build -c release
 
 # Copy to PATH
-cp icloud-status ~/bin/
+cp .build/release/icloud-status ~/bin/
 ```
 
 ## Usage
 
 ```bash
+# Full status report
 icloud-status
+
+# Brief one-line status
+icloud-status --brief
+icloud-status -b
+
+# Watch mode (auto-refresh)
+icloud-status --watch
+icloud-status -w
+
+# Custom refresh interval (seconds)
+icloud-status --watch --interval 10
+
+# Raw brctl output
+icloud-status --raw
+
+# Disable colors
+icloud-status --no-color
+
+# Show help
+icloud-status --help
+
+# Show version
+icloud-status --version
 ```
 
 ### Sample Output
@@ -99,21 +123,42 @@ ISSUES
   None detected
 ```
 
+### Brief Mode
+
+```bash
+$ icloud-status -b
+iCloud: 1.42 TB free | 36/91 synced | Bird: ✓
+```
+
 ## Development
 
 ```bash
 # Build debug version
 just build-debug
 
-# Run without compiling (as script)
-just script
+# Run with arguments
+just run --brief
 
-# Check syntax
-just check
+# Watch mode
+just watch
+
+# Update dependencies
+just update
+
+# Show dependency tree
+just deps
 
 # Clean build artifacts
 just clean
+
+# Run tests
+just test
 ```
+
+## Dependencies
+
+- [swift-argument-parser](https://github.com/apple/swift-argument-parser) - CLI argument parsing
+- [Rainbow](https://github.com/onevcat/Rainbow) - Terminal colors
 
 ## How It Works
 

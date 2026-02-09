@@ -1,8 +1,65 @@
-#!/usr/bin/env swift
-
+import ArgumentParser
 import Foundation
+import Rainbow
 
-// MARK: - Helpers
+// MARK: - CLI Command
+
+@main
+struct ICloudStatus: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "icloud-status",
+        abstract: "Display comprehensive iCloud status information",
+        version: "0.2.0"
+    )
+
+    @Flag(name: .shortAndLong, help: "Show raw brctl output")
+    var raw = false
+
+    @Flag(name: .shortAndLong, help: "Show only sync status summary")
+    var brief = false
+
+    @Flag(name: .shortAndLong, help: "Disable colored output")
+    var noColor = false
+
+    @Flag(name: .shortAndLong, help: "Watch mode - refresh every 5 seconds")
+    var watch = false
+
+    @Option(name: .shortAndLong, help: "Watch interval in seconds")
+    var interval: Int = 5
+
+    func run() throws {
+        if noColor {
+            Rainbow.enabled = false
+        }
+
+        if raw {
+            showRawOutput()
+            return
+        }
+
+        if watch {
+            watchMode()
+            return
+        }
+
+        if brief {
+            showBriefStatus()
+        } else {
+            showFullStatus()
+        }
+    }
+
+    func watchMode() {
+        while true {
+            print("\u{001B}[2J\u{001B}[H") // Clear screen
+            showFullStatus()
+            print("\n  Press Ctrl+C to exit. Refreshing in \(interval)s...".dim)
+            Thread.sleep(forTimeInterval: Double(interval))
+        }
+    }
+}
+
+// MARK: - Shell Helper
 
 func shell(_ command: String) -> (output: String, exitCode: Int32) {
     let task = Process()
@@ -23,6 +80,8 @@ func shell(_ command: String) -> (output: String, exitCode: Int32) {
     return (output.trimmingCharacters(in: .whitespacesAndNewlines), task.terminationStatus)
 }
 
+// MARK: - Formatting
+
 func formatBytes(_ bytes: Int64) -> String {
     let tb = Double(bytes) / 1_099_511_627_776
     let gb = Double(bytes) / 1_073_741_824
@@ -37,41 +96,32 @@ func formatBytes(_ bytes: Int64) -> String {
     }
 }
 
-func colorize(_ text: String, color: String) -> String {
-    let colors: [String: String] = [
-        "red": "\u{001B}[31m",
-        "green": "\u{001B}[32m",
-        "yellow": "\u{001B}[33m",
-        "blue": "\u{001B}[34m",
-        "magenta": "\u{001B}[35m",
-        "cyan": "\u{001B}[36m",
-        "white": "\u{001B}[37m",
-        "bold": "\u{001B}[1m",
-        "reset": "\u{001B}[0m"
-    ]
-    return "\(colors[color] ?? "")\(text)\(colors["reset"]!)"
-}
-
 func printHeader(_ title: String) {
     print("")
-    print(colorize(title, color: "bold"))
+    print(title.bold)
     print(String(repeating: "─", count: title.count + 2))
 }
 
-// MARK: - iCloud Status Checks
+// MARK: - Data Fetching
 
-func getQuota() -> (remaining: Int64, total: Int64)? {
+struct SyncStatus {
+    let total: Int
+    let idle: Int
+    let syncing: Int
+    let disabled: Int
+    let uploading: Int
+    let downloading: Int
+}
+
+func getQuota() -> Int64? {
     let result = shell("brctl quota 2>/dev/null")
     if let match = result.output.range(of: "\\d+", options: .regularExpression) {
-        let bytesString = String(result.output[match])
-        if let bytes = Int64(bytesString) {
-            return (bytes, 0)
-        }
+        return Int64(String(result.output[match]))
     }
     return nil
 }
 
-func getSyncStatus() -> (total: Int, idle: Int, syncing: Int, disabled: Int, uploading: Int, downloading: Int) {
+func getSyncStatus() -> SyncStatus {
     let result = shell("brctl status 2>&1")
     let lines = result.output.components(separatedBy: "\n")
 
@@ -94,15 +144,17 @@ func getSyncStatus() -> (total: Int, idle: Int, syncing: Int, disabled: Int, upl
         if line.contains("downloading") { downloading += 1; syncing += 1 }
     }
 
-    return (total, idle, syncing, disabled, uploading, downloading)
+    return SyncStatus(
+        total: total, idle: idle, syncing: syncing,
+        disabled: disabled, uploading: uploading, downloading: downloading
+    )
 }
 
 func getActiveContainers() -> [String] {
     let result = shell("brctl status 2>&1 | grep 'client:idle' | grep -v 'SYNC DISABLED' | head -15")
     var containers: [String] = []
 
-    let lines = result.output.components(separatedBy: "\n")
-    for line in lines {
+    for line in result.output.components(separatedBy: "\n") {
         if let start = line.firstIndex(of: "<"),
            let end = line.firstIndex(of: "[") {
             var name = String(line[line.index(after: start)..<end])
@@ -119,8 +171,7 @@ func getPendingItems() -> [(container: String, status: String, progress: String)
     let result = shell("brctl status 2>&1 | grep -E 'uploading|downloading'")
     var items: [(String, String, String)] = []
 
-    let lines = result.output.components(separatedBy: "\n")
-    for line in lines where !line.isEmpty {
+    for line in result.output.components(separatedBy: "\n") where !line.isEmpty {
         var status = "syncing"
         if line.contains("uploading") { status = "uploading" }
         if line.contains("downloading") { status = "downloading" }
@@ -153,11 +204,15 @@ func getDriveSize() -> String {
 func getDesktopDocumentsStatus() -> (desktop: (synced: Bool, size: String), documents: (synced: Bool, size: String)) {
     let desktopPath = shell("ls -d ~/Library/Mobile\\ Documents/com~apple~CloudDocs/Desktop 2>/dev/null")
     let desktopSynced = desktopPath.exitCode == 0
-    let desktopSize = desktopSynced ? shell("du -sh ~/Library/Mobile\\ Documents/com~apple~CloudDocs/Desktop 2>/dev/null | awk '{print $1}'").output : "N/A"
+    let desktopSize = desktopSynced
+        ? shell("du -sh ~/Library/Mobile\\ Documents/com~apple~CloudDocs/Desktop 2>/dev/null | awk '{print $1}'").output
+        : "N/A"
 
     let docsPath = shell("ls -d ~/Library/Mobile\\ Documents/com~apple~CloudDocs/Documents 2>/dev/null")
     let docsSynced = docsPath.exitCode == 0
-    let docsSize = docsSynced ? shell("du -sh ~/Library/Mobile\\ Documents/com~apple~CloudDocs/Documents 2>/dev/null | awk '{print $1}'").output : "N/A"
+    let docsSize = docsSynced
+        ? shell("du -sh ~/Library/Mobile\\ Documents/com~apple~CloudDocs/Documents 2>/dev/null | awk '{print $1}'").output
+        : "N/A"
 
     return ((desktopSynced, desktopSize), (docsSynced, docsSize))
 }
@@ -193,39 +248,23 @@ func getAccountInfo() -> String? {
     return nil
 }
 
-// MARK: - Container Name Mapping
+// MARK: - Container Name Resolution
 
 func getContainerMapping() -> [String: String] {
     let result = shell("ls ~/Library/Mobile\\ Documents/ 2>/dev/null")
     var mapping: [String: String] = [:]
 
     let knownApps: [String: String] = [
-        "garageband": "GarageBand",
-        "imovie": "iMovie",
-        "keynote": "Keynote",
-        "pages": "Pages",
-        "numbers": "Numbers",
-        "whatsapp": "WhatsApp",
-        "affinity": "Affinity",
-        "kayak": "Kayak",
-        "reddit": "Reddit",
-        "mSecure": "mSecure",
-        "eveuniverse": "EVE Universe",
-        "CloudDocs": "iCloud Drive",
-        "Notes": "Notes",
-        "Preview": "Preview",
-        "mail": "Mail",
-        "Reminders": "Reminders",
-        "Safari": "Safari",
-        "Shortcuts": "Shortcuts",
-        "TextEdit": "TextEdit",
-        "VoiceMemos": "Voice Memos",
-        "Automator": "Automator",
-        "ScriptEditor": "Script Editor",
-        "iBooks": "Books",
-        "PhotoBooth": "Photo Booth",
-        "QuickTime": "QuickTime",
-        "freeform": "Freeform"
+        "garageband": "GarageBand", "imovie": "iMovie", "keynote": "Keynote",
+        "pages": "Pages", "numbers": "Numbers", "whatsapp": "WhatsApp",
+        "affinity": "Affinity", "kayak": "Kayak", "reddit": "Reddit",
+        "mSecure": "mSecure", "eveuniverse": "EVE Universe",
+        "CloudDocs": "iCloud Drive", "Notes": "Notes", "Preview": "Preview",
+        "mail": "Mail", "Reminders": "Reminders", "Safari": "Safari",
+        "Shortcuts": "Shortcuts", "TextEdit": "TextEdit",
+        "VoiceMemos": "Voice Memos", "Automator": "Automator",
+        "ScriptEditor": "Script Editor", "iBooks": "Books",
+        "PhotoBooth": "Photo Booth", "QuickTime": "QuickTime", "freeform": "Freeform"
     ]
 
     for dir in result.output.components(separatedBy: "\n") {
@@ -242,7 +281,8 @@ func getContainerMapping() -> [String: String] {
             }
 
             if mapping[prefix] == nil && !appPart.isEmpty {
-                mapping[prefix] = appPart.replacingOccurrences(of: "-", with: " ")
+                mapping[prefix] = appPart
+                    .replacingOccurrences(of: "-", with: " ")
                     .replacingOccurrences(of: "_", with: " ")
             }
         }
@@ -261,22 +301,16 @@ func resolveContainerName(_ raw: String, mapping: [String: String]) -> String {
             "Keynote": "Keynote", "Ke": "Keynote",
             "Pages": "Pages", "Ps": "Pages",
             "Numbers": "Numbers", "Ns": "Numbers",
-            "Notes": "Notes",
-            "mail": "Mail", "ml": "Mail",
+            "Notes": "Notes", "mail": "Mail", "ml": "Mail",
             "CloudDocs": "iCloud Drive", "Cs": "iCloud Drive",
             "Preview": "Preview", "Pw": "Preview",
-            "Reminders": "Reminders",
-            "Safari": "Safari",
-            "Shortcuts": "Shortcuts",
-            "freeform": "Freeform",
-            "Automator": "Automator", "Ar": "Automator",
-            "iBooks": "Books"
+            "Reminders": "Reminders", "Safari": "Safari",
+            "Shortcuts": "Shortcuts", "freeform": "Freeform",
+            "Automator": "Automator", "Ar": "Automator", "iBooks": "Books"
         ]
 
         for (key, name) in appleApps {
-            if cleaned.contains(key) {
-                return name
-            }
+            if cleaned.contains(key) { return name }
         }
     }
 
@@ -290,22 +324,55 @@ func resolveContainerName(_ raw: String, mapping: [String: String]) -> String {
         .replacingOccurrences(of: "com.apple.", with: "")
 }
 
-// MARK: - Main
+// MARK: - Output Functions
 
-func main() {
+func showRawOutput() {
+    print("=== brctl quota ===".bold)
+    print(shell("brctl quota 2>&1").output)
+    print("\n=== brctl status ===".bold)
+    print(shell("brctl status 2>&1").output)
+}
+
+func showBriefStatus() {
+    let sync = getSyncStatus()
+    let quota = getQuota()
+    let bird = getBirdStatus()
+
+    print("iCloud: ".bold, terminator: "")
+
+    if let q = quota {
+        print(formatBytes(q).green, terminator: " free | ")
+    }
+
+    print("\(sync.idle)/\(sync.total) synced".cyan, terminator: "")
+
+    if sync.syncing > 0 {
+        print(" | \(sync.syncing) syncing".yellow, terminator: "")
+    }
+
+    let issues = getIssues()
+    if !issues.isEmpty {
+        print(" | \(issues.count) issues".red, terminator: "")
+    }
+
+    print(" | Bird: ", terminator: "")
+    print(bird.running ? "✓".green : "✗".red)
+}
+
+func showFullStatus() {
     let containerMapping = getContainerMapping()
 
     print("")
-    print(colorize("╔══════════════════════════════════════╗", color: "cyan"))
-    print(colorize("║         iCloud Status Report         ║", color: "cyan"))
-    print(colorize("╚══════════════════════════════════════╝", color: "cyan"))
+    print("╔══════════════════════════════════════╗".cyan)
+    print("║         iCloud Status Report         ║".cyan)
+    print("╚══════════════════════════════════════╝".cyan)
 
     // Storage
     printHeader("STORAGE")
     if let quota = getQuota() {
-        print("  Remaining: \(colorize(formatBytes(quota.remaining), color: "green"))")
+        print("  Remaining: \(formatBytes(quota).green)")
     } else {
-        print("  Remaining: \(colorize("Unable to fetch", color: "red"))")
+        print("  Remaining: \("Unable to fetch".red)")
     }
 
     if let account = getAccountInfo() {
@@ -316,15 +383,15 @@ func main() {
     printHeader("SYNC STATUS")
     let sync = getSyncStatus()
     print("  Total Containers:    \(sync.total)")
-    print("  Idle (synced):       \(colorize("\(sync.idle)", color: "green"))")
-    print("  Currently syncing:   \(sync.syncing > 0 ? colorize("\(sync.syncing)", color: "yellow") : "0")")
+    print("  Idle (synced):       \(String(sync.idle).green)")
+    print("  Currently syncing:   \(sync.syncing > 0 ? String(sync.syncing).yellow : "0")")
     if sync.uploading > 0 {
         print("    ↑ Uploading:       \(sync.uploading)")
     }
     if sync.downloading > 0 {
         print("    ↓ Downloading:     \(sync.downloading)")
     }
-    print("  Disabled (no app):   \(colorize("\(sync.disabled)", color: "blue"))")
+    print("  Disabled (no app):   \(String(sync.disabled).blue)")
 
     if let lastSync = getLastSyncTime() {
         print("  Last Sync:           \(lastSync)")
@@ -339,20 +406,19 @@ func main() {
     // Desktop & Documents
     let ddStatus = getDesktopDocumentsStatus()
     printHeader("DESKTOP & DOCUMENTS")
-    let desktopStatus = ddStatus.desktop.synced ? colorize("Synced", color: "green") : colorize("Local", color: "yellow")
-    let docsStatus = ddStatus.documents.synced ? colorize("Synced", color: "green") : colorize("Local", color: "yellow")
+    let desktopStatus = ddStatus.desktop.synced ? "Synced".green : "Local".yellow
+    let docsStatus = ddStatus.documents.synced ? "Synced".green : "Local".yellow
     print("  Desktop:   \(desktopStatus) (\(ddStatus.desktop.size.isEmpty ? "0B" : ddStatus.desktop.size))")
     print("  Documents: \(docsStatus) (\(ddStatus.documents.size.isEmpty ? "0B" : ddStatus.documents.size))")
 
     // Daemon Status
     printHeader("DAEMON STATUS")
     let bird = getBirdStatus()
-    let birdStatus = bird.running ? colorize("Running", color: "green") + " (PID \(bird.pid))" : colorize("Stopped", color: "red")
+    let birdStatus = bird.running ? "Running".green + " (PID \(bird.pid))" : "Stopped".red
     print("  Bird:    \(birdStatus)")
 
     let network = getNetworkStatus()
-    let networkStatus = network ? colorize("Reachable", color: "green") : colorize("Unreachable", color: "red")
-    print("  Network: \(networkStatus)")
+    print("  Network: \(network ? "Reachable".green : "Unreachable".red)")
 
     // Active Containers
     printHeader("ACTIVE CONTAINERS")
@@ -365,7 +431,7 @@ func main() {
             print("  • \(name)")
         }
         if containers.count > 12 {
-            print("  ... and \(containers.count - 12) more")
+            print("  ... and \(containers.count - 12) more".dim)
         }
     }
 
@@ -384,14 +450,12 @@ func main() {
     let issues = getIssues()
     printHeader("ISSUES")
     if issues.isEmpty {
-        print("  \(colorize("None detected", color: "green"))")
+        print("  \("None detected".green)")
     } else {
         for issue in issues.prefix(5) {
-            print("  \(colorize("⚠", color: "yellow")) \(issue)")
+            print("  \("⚠".yellow) \(issue)")
         }
     }
 
     print("")
 }
-
-main()
