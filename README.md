@@ -1,6 +1,7 @@
 # icloud-status
 
 [![GitHub release](https://img.shields.io/github/v/tag/aladac/icloud-status?label=version)](https://github.com/aladac/icloud-status/releases)
+[![Test](https://github.com/aladac/icloud-status/actions/workflows/test.yml/badge.svg)](https://github.com/aladac/icloud-status/actions/workflows/test.yml)
 
 A macOS CLI tool to display comprehensive iCloud status information.
 
