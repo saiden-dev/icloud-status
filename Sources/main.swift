@@ -157,8 +157,8 @@ func getActiveContainers() -> [String] {
     for line in result.output.components(separatedBy: "\n") {
         if let start = line.firstIndex(of: "<"),
            let end = line.firstIndex(of: "[") {
-            var name = String(line[line.index(after: start)..<end])
-            name = name.replacingOccurrences(of: #"\{\d+\}"#, with: "", options: .regularExpression)
+            let name = String(line[line.index(after: start)..<end])
+            // Keep the raw format with {N} for proper resolution
             if !name.isEmpty {
                 containers.append(name)
             }
@@ -184,7 +184,6 @@ func getPendingItems() -> [(container: String, status: String, progress: String)
         if let start = line.firstIndex(of: "<"),
            let end = line.firstIndex(of: "[") {
             let name = String(line[line.index(after: start)..<end])
-                .replacingOccurrences(of: #"\{\d+\}"#, with: "", options: .regularExpression)
             items.append((name, status, progress))
         }
     }
@@ -282,74 +281,113 @@ func getContainerMapping() -> [String: String] {
     let result = shell("ls ~/Library/Mobile\\ Documents/ 2>/dev/null")
     var mapping: [String: String] = [:]
 
-    let knownApps: [String: String] = [
-        "garageband": "GarageBand", "imovie": "iMovie", "keynote": "Keynote",
-        "pages": "Pages", "numbers": "Numbers", "whatsapp": "WhatsApp",
-        "affinity": "Affinity", "kayak": "Kayak", "reddit": "Reddit",
-        "mSecure": "mSecure", "eveuniverse": "EVE Universe",
-        "CloudDocs": "iCloud Drive", "Notes": "Notes", "Preview": "Preview",
-        "mail": "Mail", "Reminders": "Reminders", "Safari": "Safari",
-        "Shortcuts": "Shortcuts", "TextEdit": "TextEdit",
-        "VoiceMemos": "Voice Memos", "Automator": "Automator",
-        "ScriptEditor": "Script Editor", "iBooks": "Books",
-        "PhotoBooth": "Photo Booth", "QuickTime": "QuickTime", "freeform": "Freeform"
-    ]
-
-    for dir in result.output.components(separatedBy: "\n") {
+    for dir in result.output.components(separatedBy: "\n") where !dir.isEmpty {
+        // Format: TEAMID~reverse~bundle~id~AppName or com~apple~AppName
         let parts = dir.components(separatedBy: "~")
-        if parts.count >= 2 {
-            let appPart = parts.last ?? ""
-            let prefix = parts[0]
+        guard parts.count >= 2 else { continue }
 
-            for (key, name) in knownApps {
-                if dir.lowercased().contains(key.lowercased()) {
-                    mapping[prefix] = name
-                    break
-                }
-            }
+        let appName = resolveAppName(from: parts)
 
-            if mapping[prefix] == nil && !appPart.isEmpty {
-                mapping[prefix] = appPart
-                    .replacingOccurrences(of: "-", with: " ")
-                    .replacingOccurrences(of: "_", with: " ")
+        // Build the obfuscated pattern that brctl uses
+        // "57T9237FN3~net~whatsapp~WhatsApp" becomes "5{8}3.n{1}t.w{6}p.W{6}p"
+        // We need to map "583.n1t.w6p.W6p" (our simplified version) to the app name
+        var patternParts: [String] = []
+        for part in parts {
+            if part.count >= 2 {
+                // Create pattern: first char + middle length + last char
+                let pattern = "\(part.first!)\(part.count - 2)\(part.last!)"
+                patternParts.append(pattern)
+            } else if part.count == 1 {
+                patternParts.append(part)
             }
+        }
+        let fullPattern = patternParts.joined(separator: ".")
+        mapping[fullPattern] = appName
+
+        // Also map just the team ID pattern (first part)
+        if let firstPart = patternParts.first {
+            mapping[firstPart] = appName
         }
     }
 
     return mapping
 }
 
-func resolveContainerName(_ raw: String, mapping: [String: String]) -> String {
-    let cleaned = raw
-        .replacingOccurrences(of: #"\{\d+\}"#, with: "", options: .regularExpression)
-        .trimmingCharacters(in: .whitespaces)
+func resolveAppName(from parts: [String]) -> String {
+    // Try to get name from installed app
+    let bundleId = parts.dropFirst().joined(separator: ".").replacingOccurrences(of: "~", with: ".")
 
-    if cleaned.contains("cm.ae") || cleaned.contains("com.apple") {
-        let appleApps: [String: String] = [
-            "Keynote": "Keynote", "Ke": "Keynote",
-            "Pages": "Pages", "Ps": "Pages",
-            "Numbers": "Numbers", "Ns": "Numbers",
-            "Notes": "Notes", "mail": "Mail", "ml": "Mail",
-            "CloudDocs": "iCloud Drive", "Cs": "iCloud Drive",
-            "Preview": "Preview", "Pw": "Preview",
-            "Reminders": "Reminders", "Safari": "Safari",
-            "Shortcuts": "Shortcuts", "freeform": "Freeform",
-            "Automator": "Automator", "Ar": "Automator", "iBooks": "Books"
-        ]
-
-        for (key, name) in appleApps {
-            if cleaned.contains(key) { return name }
+    // Check if app is installed and get its display name
+    let mdfindResult = shell("mdfind \"kMDItemCFBundleIdentifier == '\(bundleId)'\" 2>/dev/null | head -1")
+    if !mdfindResult.output.isEmpty {
+        let nameResult = shell("defaults read \"\(mdfindResult.output)/Contents/Info\" CFBundleDisplayName 2>/dev/null || defaults read \"\(mdfindResult.output)/Contents/Info\" CFBundleName 2>/dev/null")
+        let name = nameResult.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\u200e", with: "")
+        if !name.isEmpty && !name.contains("does not exist") {
+            return name
         }
     }
 
-    let parts = cleaned.components(separatedBy: ".")
-    if let first = parts.first, let mapped = mapping[first] {
-        return mapped
+    // Fallback: parse from directory name
+    let lastPart = parts.last ?? ""
+    let cleaned = lastPart
+        .replacingOccurrences(of: "10", with: "")
+        .replacingOccurrences(of: "-", with: " ")
+        .replacingOccurrences(of: "_", with: " ")
+
+    // Capitalize
+    if cleaned.first?.isUppercase == true {
+        return cleaned
+    }
+    return cleaned.prefix(1).uppercased() + cleaned.dropFirst()
+}
+
+func resolveContainerName(_ raw: String, mapping: [String: String]) -> String {
+    // Raw format: "5{8}3.n{1}t.w{6}p.W{6}p" where {N} = N hidden chars
+    // Convert to: "583.n1t.w6p.W6p" for lookup
+
+    let simplified = raw.replacingOccurrences(of: #"\{(\d+)\}"#, with: "$1", options: .regularExpression)
+        .trimmingCharacters(in: .whitespaces)
+
+    // Try full pattern match first
+    if let name = mapping[simplified] {
+        return name
     }
 
-    return cleaned
-        .replacingOccurrences(of: "cm.ae.", with: "")
-        .replacingOccurrences(of: "com.apple.", with: "")
+    // Try first part only (team ID)
+    let parts = simplified.components(separatedBy: ".")
+    if let first = parts.first, let name = mapping[first] {
+        return name
+    }
+
+    // Apple apps fallback - map last meaningful part
+    // c1m.a3e.K5e -> Keynote (K5e pattern)
+    let appleApps: [String: String] = [
+        "K5e": "Keynote", "P3s": "Pages", "N5s": "Numbers",
+        "C7s": "iCloud Drive", "m2l": "Mail", "P5w": "Preview",
+        "A7r": "Automator", "S7s": "Shortcuts", "N3s": "Notes",
+        "R7s": "Reminders", "S4i": "Safari", "F6m": "Freeform",
+        "i4s": "iCloud", "c7a": "Calendar", "Q14X": "QuickTime",
+        "S11r": "Script Editor", "s5x": "Siri", "d1p": "DataProtection"
+    ]
+
+    for part in parts.reversed() {
+        if let name = appleApps[part] {
+            return name
+        }
+    }
+
+    // Try partial match on last part
+    if let lastPart = parts.last {
+        for (key, name) in appleApps {
+            if lastPart.hasPrefix(String(key.prefix(1))) && lastPart.hasSuffix(String(key.suffix(1))) {
+                return name
+            }
+        }
+    }
+
+    // Last resort: return cleaned last part
+    return parts.last ?? raw
 }
 
 // MARK: - Output Functions
