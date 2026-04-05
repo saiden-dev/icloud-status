@@ -53,7 +53,7 @@ struct ICloudStatus: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "icloud-status",
         abstract: "Display comprehensive iCloud status information",
-        version: "0.1.2"
+        version: "0.1.3"
     )
 
     @Flag(name: .shortAndLong, help: "Show raw brctl output")
