@@ -29,7 +29,7 @@ A macOS CLI tool to display comprehensive iCloud status information.
 ### Homebrew
 
 ```bash
-brew install aladac/tap/icloud-status
+brew install saiden-dev/tap/icloud-status
 ```
 
 ### Using just
