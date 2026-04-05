@@ -34,3 +34,61 @@ jobs:
         with:
           files: dist/icloud-status-${{ github.ref_name }}-macos.tar.gz
           generate_release_notes: true
+
+  update-homebrew:
+    name: update-homebrew
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release asset and compute checksum
+        id: checksums
+        run: |
+          curl -fsSL "https://github.com/saiden-dev/icloud-status/releases/download/${GITHUB_REF_NAME}/icloud-status-${GITHUB_REF_NAME}-macos.tar.gz" -o asset.tar.gz
+          sha=$(sha256sum asset.tar.gz | cut -d' ' -f1)
+          echo "macos_tar=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA_MACOS="${{ steps.checksums.outputs.macos_tar }}"
+
+          cat > /tmp/icloud-status.rb <<EOF
+          class IcloudStatus < Formula
+            desc "macOS CLI tool to display comprehensive iCloud status information"
+            homepage "https://github.com/saiden-dev/icloud-status"
+            version "${VERSION}"
+            license "MIT"
+
+            depends_on :macos
+
+            on_macos do
+              url "https://github.com/saiden-dev/icloud-status/releases/download/v#{version}/icloud-status-v#{version}-macos.tar.gz"
+              sha256 "${SHA_MACOS}"
+            end
+
+            def install
+              bin.install "icloud-status"
+            end
+
+            test do
+              assert_match "icloud-status", shell_output("#{bin}/icloud-status --version")
+            end
+          end
+          EOF
+
+          sed -i 's/^          //' /tmp/icloud-status.rb
+
+          CONTENT=$(base64 -w0 /tmp/icloud-status.rb)
+          SHA=$(gh api repos/saiden-dev/homebrew-tap/contents/Formula/icloud-status.rb --jq '.sha')
+
+          gh api repos/saiden-dev/homebrew-tap/contents/Formula/icloud-status.rb \
+            -X PUT \
+            -f message="Update icloud-status to ${VERSION}" \
+            -f content="${CONTENT}" \
+            -f sha="${SHA}"
